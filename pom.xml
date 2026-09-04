@@ -36,7 +36,7 @@
 
         <docker.image.prefix>springcommunity</docker.image.prefix>
         <!-- CI path-filter: root pom change rebuilds all 8 service images -->
-        <!-- bump: re-run after OIDC repository-claim trust fix -->
+        <!-- bump: re-run after OIDC sub org@id/repo@id trust fix -->
         <docker.image.exposed.port>9090</docker.image.exposed.port>
         <docker.image.dockerfile.dir>${basedir}</docker.image.dockerfile.dir>
         <!-- podman is also supported -->
