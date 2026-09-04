@@ -35,6 +35,7 @@
         <datasource-micrometer.version>2.0.1</datasource-micrometer.version>
 
         <docker.image.prefix>springcommunity</docker.image.prefix>
+        <!-- CI path-filter: root pom change rebuilds all 8 service images -->
         <docker.image.exposed.port>9090</docker.image.exposed.port>
         <docker.image.dockerfile.dir>${basedir}</docker.image.dockerfile.dir>
         <!-- podman is also supported -->

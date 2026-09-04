@@ -1,29 +1,65 @@
-# This workflow will build a Java project with Maven, and cache/restore any dependencies to improve the workflow execution time
-# For more information see: https://help.github.com/actions/language-and-framework-guides/building-and-testing-java-with-maven
+# =============================================================================
+# .github/workflows/maven-build.yml
+# Purpose: Compile and unit-test the multi-module Maven project on every push
+#          and pull request to main. Does not build Docker images or touch ECR.
+# Related: build-push.yml owns the ARM64 image build and ECR push path.
+# =============================================================================
 
+# =============================================================================
+# Workflow name
+# Purpose: Identifies this workflow in the GitHub Actions UI.
+# =============================================================================
 name: Java CI with Maven
 
+# =============================================================================
+# Trigger events
+# Purpose: Run on changes aimed at main (push or pull request).
+# =============================================================================
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
+# =============================================================================
+# Jobs
+# Purpose: Defines the Maven package job.
+# =============================================================================
 jobs:
-  build:
 
+  # =============================================================================
+  # Build job
+  # Purpose: Compile all modules and run unit tests with JDK 17.
+  # =============================================================================
+  build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        java: [ '17' ]
+        java: ["17"]
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK ${{matrix.java}}
-      uses: actions/setup-java@v4
-      with:
-        java-version: ${{matrix.java}}
-        distribution: 'adopt'
-        cache: maven
-    - name: Build with Maven
-      run: mvn -B package --file pom.xml
+
+      # =============================================================================
+      # Checkout
+      # Purpose: Fetch the repository at the commit under test.
+      # =============================================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # =============================================================================
+      # JDK setup
+      # Purpose: Install the matrix JDK and enable the Maven dependency cache.
+      # =============================================================================
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: adopt
+          cache: maven
+
+      # =============================================================================
+      # Maven package
+      # Purpose: Package the reactor. -B keeps Maven non-interactive in CI logs.
+      # =============================================================================
+      - name: Build with Maven
+        run: mvn -B package --file pom.xml

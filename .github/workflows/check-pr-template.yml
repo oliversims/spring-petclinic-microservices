@@ -1,25 +1,55 @@
+# =============================================================================
+# .github/workflows/check-pr-template.yml
+# Purpose: Triage pull requests opened against this fork/upstream sample.
+#          Closes obvious practice/bootcamp PRs, flags incomplete PR templates,
+#          and later closes stale incomplete PRs.
+# Optional secret: ORG_READ_PAT (classic PAT with read:org for private members).
+# =============================================================================
+
+# =============================================================================
+# Workflow name
+# Purpose: Identifies this workflow in the GitHub Actions UI.
+# =============================================================================
 name: Triage pull requests
 
+# =============================================================================
+# Trigger events
+# Purpose: Live triage on PR events; daily cleanup on a schedule.
+# =============================================================================
 on:
   pull_request_target:
     types: [opened, reopened, edited]
   schedule:
-    - cron: '0 8 * * *'   # every day at 08:00 UTC
+    - cron: "0 8 * * *"
 
+# =============================================================================
+# Permissions
+# Purpose: Comment, label, and close PRs/issues from this workflow.
+# =============================================================================
 permissions:
   pull-requests: write
   issues: write
 
+# =============================================================================
+# Jobs
+# Purpose: PR triage on events; stale incomplete PR closer on cron.
+# =============================================================================
 jobs:
-  # ── 1. On every PR open/edit ─────────────────────────────────────────────────
-  #   a) Detect non-project practice/test submissions → close immediately
-  #   b) Otherwise, check that the PR template was filled in
-  # Running both checks in the same job ensures they are sequential and never
-  # post two independent comments on the same PR.
+
+  # =============================================================================
+  # Triage PR job
+  # Purpose: On PR open/edit — close practice submissions, else require a
+  #          filled PR template. Sequential in one job to avoid duplicate comments.
+  # =============================================================================
   triage-pr:
-    if: github.event_name == 'pull_request_target'
+    if: github.event_name == "pull_request_target"
     runs-on: ubuntu-latest
     steps:
+
+      # =============================================================================
+      # Ensure labels
+      # Purpose: Create invalid and needs-information labels if missing (422 ok).
+      # =============================================================================
       - name: Ensure required labels exist
         uses: actions/github-script@v7
         with:
@@ -32,16 +62,18 @@ jobs:
               try {
                 await github.rest.issues.createLabel({ owner: context.repo.owner, repo: context.repo.repo, ...label });
               } catch (e) {
-                if (e.status !== 422) throw e; // 422 = already exists, ignore
+                if (e.status !== 422) throw e;
               }
             }
 
+      # =============================================================================
+      # Pattern and template check
+      # Purpose: Org-member bypass, close non-project PRs, or flag incomplete bodies.
+      #          ORG_READ_PAT detects private org members; absent → public-only bypass.
+      # =============================================================================
       - name: Check non-project PR patterns then template completeness
         uses: actions/github-script@v7
         env:
-          # Classic PAT with read:org scope (store as repo/org secret ORG_READ_PAT).
-          # Required to detect *private* org members — GITHUB_TOKEN only sees public ones.
-          # If the secret is absent the workflow still runs but bypasses public members only.
           ORG_READ_PAT: ${{ secrets.ORG_READ_PAT }}
         with:
           script: |
@@ -51,23 +83,9 @@ jobs:
               pull_number: context.payload.pull_request.number,
             });
 
-            // ── ORG MEMBER BYPASS ────────────────────────────────────────────────────────
-            // GITHUB_TOKEN authenticates as github-actions[bot], which is not an org member.
-            // The checkMembershipForUser endpoint therefore returns 302 for everyone when
-            // using GITHUB_TOKEN — it cannot distinguish members from non-members.
-            //
-            // Solution: use ORG_READ_PAT (a classic PAT with read:org scope stored as a
-            // repo/org secret) only for this call, by overriding the Authorization header
-            // on a single request through the existing `github` client. All write
-            // operations below still use the default GITHUB_TOKEN so automated comments
-            // appear as github-actions[bot].
-            //
-            // Note: `require('@actions/github')` is NOT available here — github-script's
-            // bundled runtime has no on-disk node_modules for user scripts to resolve
-            // against, so requiring it throws "Cannot find module '@actions/github'".
-            //
-            // Fallback: if ORG_READ_PAT is not configured, the GITHUB_TOKEN is used and
-            // only *public* org members are bypassed (302 is treated as non-member).
+            // ORG MEMBER BYPASS
+            // GITHUB_TOKEN is github-actions[bot] and cannot see private membership.
+            // ORG_READ_PAT (read:org) is used only for this membership call.
             const orgReadToken = process.env.ORG_READ_PAT;
 
             try {
@@ -82,18 +100,15 @@ jobs:
               }
             } catch (e) {
               if (e.status !== 404 && e.status !== 302) throw e;
-              // 404 = confirmed non-member; 302 = token lacks org read → treat as non-member
             }
 
-            // ── PART A: detect non-project practice / test submissions ────────────────
-            // Only scan title and branch — the PR template body contains the word
-            // "bootcamp" itself and would cause false positives if included.
+            // PART A: non-project practice / test submissions (title + branch only)
             const title  = pr.title || '';
             const branch = pr.head.ref || '';
             const combined = `${title} ${branch}`.toLowerCase();
 
             const nonProjectPatterns = [
-              /\bspc-\d+/i,                                                     // SPC-001, SPC-003-T1 …
+              /\bspc-\d+/i,
               /add\s+(jenkins|gitlab|github\s+actions)\s+(ci|pipeline)/i,
               /add\s+ci\s+(workflow|pipeline)/i,
               /push\s+(image|docker)\s+to\s+(ecr|dockerhub|registry)/i,
@@ -142,22 +157,18 @@ jobs:
                 state: 'closed',
               });
 
-              // Stop here — no need to check the template on a non-project PR.
               return;
             }
 
             console.log(`No non-project pattern detected on PR #${pr.number} — checking template completeness.`);
 
-            // ── PART B: check that the PR template was properly filled in ────────────
+            // PART B: PR template completeness
             const body = pr.body || '';
 
             function isIncomplete(text) {
               if (text.trim().length < 30) return true;
-              // Template HTML comment still present → body was never edited
               if (text.includes('<!-- Please describe your change')) return true;
-              // Placeholder issue reference was not replaced
               if (/Fixes\s*#\s*\(issue\)/.test(text)) return true;
-              // All checklist items still unchecked
               const unchecked = (text.match(/- \[ \]/g) || []).length;
               const checked   = (text.match(/- \[x\]/gi) || []).length;
               if (unchecked >= 3 && checked === 0) return true;
@@ -224,11 +235,19 @@ jobs:
               }
             }
 
-  # ── 2. Daily: close PRs still labelled needs-information after 7 days ────────
+  # =============================================================================
+  # Close stale incomplete job
+  # Purpose: Daily — close open PRs still labelled needs-information after 7 days.
+  # =============================================================================
   close-stale-incomplete:
-    if: github.event_name == 'schedule'
+    if: github.event_name == "schedule"
     runs-on: ubuntu-latest
     steps:
+
+      # =============================================================================
+      # Close stale PRs
+      # Purpose: Comment and close PRs with incomplete templates and no recent activity.
+      # =============================================================================
       - name: Close PRs with incomplete template after 7 days of inactivity
         uses: actions/github-script@v7
         with:

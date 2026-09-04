@@ -1,0 +1,333 @@
+# =============================================================================
+# .github/workflows/build-push.yml
+# Purpose: CI for the Petclinic services. Builds ARM64 images, scans them, and
+#          pushes to Terraform-managed petclinic-dev/* ECR, then tells the
+#          platform repo which tag to deploy.
+# CI only: this workflow never runs kubectl or helm. ArgoCD deploys.
+# AWS auth is OIDC (no access keys). Set these as repository secrets:
+#   AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID
+# Cross-repo dispatch also needs:
+#   PLATFORM_REPO_TOKEN — PAT with repo access to petclinic-platform
+# =============================================================================
+
+# =============================================================================
+# Workflow name
+# Purpose: Identifies this workflow in the GitHub Actions UI.
+# =============================================================================
+name: build-push
+
+# =============================================================================
+# Trigger events
+# Purpose: Runs image CI only on pushes to main.
+# =============================================================================
+on:
+  push:
+    branches: [main]
+
+# =============================================================================
+# Permissions
+# Purpose: OIDC token for AWS assume-role; read repo contents for checkout.
+# =============================================================================
+permissions:
+  id-token: write
+  contents: read
+
+# =============================================================================
+# Jobs
+# Purpose: Detect changes, build/push images, dispatch the platform repo.
+# =============================================================================
+jobs:
+
+  # =============================================================================
+  # Detect changes job
+  # Purpose: Which of the 8 services changed. docker/** or root pom.xml
+  #          rebuilds all eight. Outputs a JSON array for the build matrix.
+  # =============================================================================
+  changes:
+    name: detect-changes
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.collect.outputs.services }}
+      any: ${{ steps.collect.outputs.any }}
+    steps:
+
+      # =============================================================================
+      # Checkout
+      # Purpose: Fetch the commit that triggered the workflow.
+      # =============================================================================
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # =============================================================================
+      # Path filter
+      # Purpose: Map changed paths to service names (shared docker/pom → all).
+      # =============================================================================
+      - name: Path filter
+        id: filter
+        uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6 # v3
+        with:
+          filters: |
+            shared: &shared
+              - 'docker/**'
+              - 'pom.xml'
+            config-server:
+              - *shared
+              - 'spring-petclinic-config-server/**'
+            discovery-server:
+              - *shared
+              - 'spring-petclinic-discovery-server/**'
+            api-gateway:
+              - *shared
+              - 'spring-petclinic-api-gateway/**'
+            customers-service:
+              - *shared
+              - 'spring-petclinic-customers-service/**'
+            visits-service:
+              - *shared
+              - 'spring-petclinic-visits-service/**'
+            vets-service:
+              - *shared
+              - 'spring-petclinic-vets-service/**'
+            genai-service:
+              - *shared
+              - 'spring-petclinic-genai-service/**'
+            admin-server:
+              - *shared
+              - 'spring-petclinic-admin-server/**'
+
+      # =============================================================================
+      # Collect changed services
+      # Purpose: Turn filter booleans into one JSON array for the matrix.
+      # =============================================================================
+      - name: Collect changed services
+        id: collect
+        env:
+          CONFIG_SERVER: ${{ steps.filter.outputs.config-server }}
+          DISCOVERY_SERVER: ${{ steps.filter.outputs.discovery-server }}
+          API_GATEWAY: ${{ steps.filter.outputs.api-gateway }}
+          CUSTOMERS_SERVICE: ${{ steps.filter.outputs.customers-service }}
+          VISITS_SERVICE: ${{ steps.filter.outputs.visits-service }}
+          VETS_SERVICE: ${{ steps.filter.outputs.vets-service }}
+          GENAI_SERVICE: ${{ steps.filter.outputs.genai-service }}
+          ADMIN_SERVER: ${{ steps.filter.outputs.admin-server }}
+        run: |
+          set -euo pipefail
+          services=()
+          [[ "${CONFIG_SERVER}"     == "true" ]] && services+=("config-server")
+          [[ "${DISCOVERY_SERVER}"  == "true" ]] && services+=("discovery-server")
+          [[ "${API_GATEWAY}"       == "true" ]] && services+=("api-gateway")
+          [[ "${CUSTOMERS_SERVICE}" == "true" ]] && services+=("customers-service")
+          [[ "${VISITS_SERVICE}"    == "true" ]] && services+=("visits-service")
+          [[ "${VETS_SERVICE}"      == "true" ]] && services+=("vets-service")
+          [[ "${GENAI_SERVICE}"     == "true" ]] && services+=("genai-service")
+          [[ "${ADMIN_SERVER}"      == "true" ]] && services+=("admin-server")
+
+          if [[ ${#services[@]} -eq 0 ]]; then
+            echo "any=false" >> "${GITHUB_OUTPUT}"
+            echo "services=[]" >> "${GITHUB_OUTPUT}"
+            echo "No service modules changed."
+            exit 0
+          fi
+
+          json=$(printf '"%s",' "${services[@]}")
+          echo "any=true" >> "${GITHUB_OUTPUT}"
+          echo "services=[${json%,}]" >> "${GITHUB_OUTPUT}"
+          echo "Changed: ${services[*]}"
+
+  # =============================================================================
+  # Build job
+  # Purpose: One matrix leg per changed service — Maven arm64 image, Trivy,
+  #          then push to Terraform-managed petclinic-dev ECR.
+  # =============================================================================
+  build:
+    name: build (${{ matrix.service }})
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+    steps:
+
+      # =============================================================================
+      # Checkout
+      # Purpose: Fetch sources for the Maven module build.
+      # =============================================================================
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # =============================================================================
+      # JDK setup
+      # Purpose: Temurin 17 with Maven dependency cache.
+      # =============================================================================
+      - name: Set up JDK 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      # =============================================================================
+      # QEMU
+      # Purpose: Emulate arm64 on x86_64 GitHub runners for Graviton images.
+      # =============================================================================
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+
+      # =============================================================================
+      # Docker Buildx
+      # Purpose: Builder used by the Maven buildDocker profile.
+      # =============================================================================
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # =============================================================================
+      # Resolve image names
+      # Purpose: Short SHA tag plus local Maven image and ECR path (dev only;
+      #          petclinic-dev/* is what Terraform created in this account).
+      # =============================================================================
+      - name: Resolve image names
+        id: names
+        env:
+          SERVICE: ${{ matrix.service }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          SHA="${GITHUB_SHA::7}"
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          {
+            echo "sha=${SHA}"
+            echo "registry=${REGISTRY}"
+            echo "module=spring-petclinic-${SERVICE}"
+            echo "local_image=springcommunity/spring-petclinic-${SERVICE}"
+            echo "dev_image=${REGISTRY}/petclinic-dev/${SERVICE}:${SHA}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # =============================================================================
+      # Build image
+      # Purpose: Maven buildDocker for linux/arm64 for this service module.
+      # =============================================================================
+      - name: Build image (arm64)
+        env:
+          MODULE: ${{ steps.names.outputs.module }}
+        run: |
+          set -euo pipefail
+          ./mvnw clean install -P buildDocker -Dcontainer.platform=linux/arm64 -pl "${MODULE}" -am
+
+      # =============================================================================
+      # Trivy CRITICAL
+      # Purpose: Fail the job if CRITICAL vulnerabilities are found.
+      # =============================================================================
+      - name: Trivy scan (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.names.outputs.local_image }}
+          format: table
+          output: trivy-${{ matrix.service }}.txt
+          severity: CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      # =============================================================================
+      # Trivy HIGH
+      # Purpose: Report HIGH findings as a warning only (does not fail).
+      # =============================================================================
+      - name: Trivy scan (HIGH, warning only)
+        if: always()
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.names.outputs.local_image }}
+          format: table
+          output: trivy-${{ matrix.service }}-high.txt
+          severity: HIGH
+          exit-code: "0"
+          ignore-unfixed: true
+
+      # =============================================================================
+      # Upload Trivy report
+      # Purpose: Keep scan output as a workflow artifact.
+      # =============================================================================
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: trivy-${{ matrix.service }}
+          path: trivy-${{ matrix.service }}*.txt
+          if-no-files-found: warn
+
+      # =============================================================================
+      # AWS credentials
+      # Purpose: OIDC assume-role into the account that owns ECR (no access keys).
+      # =============================================================================
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # =============================================================================
+      # ECR login
+      # Purpose: Authenticate Docker to the account ECR registry.
+      # =============================================================================
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      # =============================================================================
+      # Retag and push
+      # Purpose: Push the arm64 image to Terraform-managed petclinic-dev ECR only.
+      # =============================================================================
+      - name: Retag and push
+        env:
+          LOCAL_IMAGE: ${{ steps.names.outputs.local_image }}
+          DEV_IMAGE: ${{ steps.names.outputs.dev_image }}
+        run: |
+          set -euo pipefail
+          docker tag "${LOCAL_IMAGE}" "${DEV_IMAGE}"
+          docker push "${DEV_IMAGE}"
+
+  # =============================================================================
+  # Dispatch job
+  # Purpose: Tell petclinic-platform which services and SHA to write into
+  #          helm-values (repository_dispatch app-image-built).
+  # =============================================================================
+  dispatch:
+    name: dispatch-to-platform
+    needs: [changes, build]
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+
+      # =============================================================================
+      # Build payload
+      # Purpose: Short SHA and JSON service list for the dispatch body.
+      # =============================================================================
+      - name: Build payload
+        id: payload
+        env:
+          SERVICES: ${{ needs.changes.outputs.services }}
+        run: |
+          set -euo pipefail
+          echo "sha=${GITHUB_SHA::7}" >> "${GITHUB_OUTPUT}"
+          echo "services=${SERVICES}" >> "${GITHUB_OUTPUT}"
+
+      # =============================================================================
+      # Dispatch app-image-built
+      # Purpose: Trigger update-image-tags.yml on the platform repo.
+      # =============================================================================
+      - name: Dispatch app-image-built
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
+        with:
+          token: ${{ secrets.PLATFORM_REPO_TOKEN }}
+          repository: ${{ github.repository_owner }}/petclinic-platform
+          event-type: app-image-built
+          client-payload: |
+            {
+              "sha": "${{ steps.payload.outputs.sha }}",
+              "services": ${{ steps.payload.outputs.services }}
+            }
