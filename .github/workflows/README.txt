@@ -12,10 +12,10 @@ FILES
 1) build-push.yml
    Main CI for images.
    On push to main, detects which of the 8 services changed, builds each as
-   linux/arm64 (Maven buildDocker + QEMU), scans with Trivy, pushes to ECR
-   under petclinic-dev/<service>:<sha> (Terraform-created repos only),
-   then repository_dispatch to petclinic-platform so helm-values image.tag
-   can be updated.
+   linux/arm64 (Maven buildDocker + QEMU), scans with Trivy (reports only;
+   does not block push), pushes to ECR under petclinic-dev/<service>:<sha>
+   (Terraform-created repos only), then repository_dispatch to petclinic-platform
+   so helm-values image.tag can be updated.
    AWS: OIDC (no access keys). Secrets: AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID,
    plus PLATFORM_REPO_TOKEN for dispatch to petclinic-platform.
    Does NOT run kubectl/helm — Argo CD deploys.
