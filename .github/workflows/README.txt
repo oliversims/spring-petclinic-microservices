@@ -10,22 +10,10 @@ FILES
 -----
 
 1) build-push.yml
-   Main (and only image) CI.
-   On push to main, detects which of the 8 services changed, builds each as
-   linux/arm64 (Maven buildDocker + QEMU), scans with Trivy (reports only;
-   does not block push), pushes to ECR under petclinic-dev/<service>:<sha>
-   (Terraform-created repos only), then repository_dispatch to petclinic-platform
-   so helm-values image.tag can be updated.
-   AWS: OIDC (no access keys). Secrets: AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID,
-   plus PLATFORM_REPO_TOKEN for dispatch to petclinic-platform.
-   Does NOT run kubectl/helm — Argo CD deploys.
-
-2) check-pr-template.yml
-   PR hygiene for this sample/fork (not related to ECR).
-   On PR open/edit: closes obvious practice/bootcamp PRs; otherwise requires
-   a filled PR template (needs-information label).
-   Daily cron: closes PRs still incomplete after 7 days.
-   Optional secret: ORG_READ_PAT (bypass private org members).
+   Push to main → build changed services (arm64) → Trivy (report only) →
+   push to petclinic-dev/* ECR → dispatch petclinic-platform for image.tag.
+   Secrets: AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID, PLATFORM_REPO_TOKEN.
+   No kubectl/helm (Argo CD deploys).
 
 
 WORKFLOW SKETCH
