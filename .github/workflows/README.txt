@@ -10,7 +10,7 @@ FILES
 -----
 
 1) build-push.yml
-   Main CI for images.
+   Main (and only image) CI.
    On push to main, detects which of the 8 services changed, builds each as
    linux/arm64 (Maven buildDocker + QEMU), scans with Trivy (reports only;
    does not block push), pushes to ECR under petclinic-dev/<service>:<sha>
@@ -20,13 +20,8 @@ FILES
    plus PLATFORM_REPO_TOKEN for dispatch to petclinic-platform.
    Does NOT run kubectl/helm — Argo CD deploys.
 
-2) maven-build.yml
-   Lightweight Java CI.
-   On push/PR to main: JDK 17 + mvn package (compile + unit tests).
-   No Docker, no ECR, no deploy. Catches broken builds before image CI.
-
-3) check-pr-template.yml
-   PR hygiene for this sample/fork.
+2) check-pr-template.yml
+   PR hygiene for this sample/fork (not related to ECR).
    On PR open/edit: closes obvious practice/bootcamp PRs; otherwise requires
    a filled PR template (needs-information label).
    Daily cron: closes PRs still incomplete after 7 days.
@@ -38,21 +33,14 @@ WORKFLOW SKETCH
 
   Developer
       |
-      |  push / PR to main (app repo)
+      |  push to main (app repo)
       v
-  +------------------+     +------------------------+
-  | maven-build.yml  |     | check-pr-template.yml  |
-  | compile + tests  |     | (PR events / daily)    |
-  +--------+---------+     +------------------------+
-           |
-           |  (same push to main also triggers image CI)
-           v
   +--------------------------------------------------+
   | build-push.yml                                   |
   |  1. path-filter → which services changed         |
   |  2. matrix: mvn buildDocker (arm64)              |
   |  3. Trivy scan                                   |
-  |  4. push → ECR petclinic-dev/* (Terraform)           |
+  |  4. push → ECR petclinic-dev/* (Terraform)       |
   |  5. repository_dispatch → petclinic-platform     |
   +------------------------+-------------------------+
                            |
