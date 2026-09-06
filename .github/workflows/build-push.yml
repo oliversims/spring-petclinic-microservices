@@ -1,7 +1,7 @@
 # =============================================================================
 # .github/workflows/build-push.yml
 # Purpose: CI for the Petclinic services. Builds ARM64 images, scans them, and
-#          pushes to Terraform-managed petclinic-dev/* ECR, then tells the
+#          pushes to Terraform-managed petclinic-prod/* ECR, then tells the
 #          platform repo which tag to deploy.
 # CI only: this workflow never runs kubectl or helm. ArgoCD deploys.
 # AWS auth is OIDC (no access keys). Set these as repository secrets:
@@ -18,11 +18,12 @@ name: build-push
 
 # =============================================================================
 # Trigger events
-# Purpose: Runs image CI only on pushes to main.
+# Purpose: Runs image CI on pushes to main, or manual Run workflow (all 8 services).
 # =============================================================================
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # =============================================================================
 # Permissions
@@ -64,6 +65,7 @@ jobs:
       # =============================================================================
       - name: Path filter
         id: filter
+        if: github.event_name == 'push'
         uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6 # v3
         with:
           filters: |
@@ -102,6 +104,7 @@ jobs:
       - name: Collect changed services
         id: collect
         env:
+          EVENT_NAME: ${{ github.event_name }}
           CONFIG_SERVER: ${{ steps.filter.outputs.config-server }}
           DISCOVERY_SERVER: ${{ steps.filter.outputs.discovery-server }}
           API_GATEWAY: ${{ steps.filter.outputs.api-gateway }}
@@ -113,14 +116,28 @@ jobs:
         run: |
           set -euo pipefail
           services=()
-          [[ "${CONFIG_SERVER}"     == "true" ]] && services+=("config-server")
-          [[ "${DISCOVERY_SERVER}"  == "true" ]] && services+=("discovery-server")
-          [[ "${API_GATEWAY}"       == "true" ]] && services+=("api-gateway")
-          [[ "${CUSTOMERS_SERVICE}" == "true" ]] && services+=("customers-service")
-          [[ "${VISITS_SERVICE}"    == "true" ]] && services+=("visits-service")
-          [[ "${VETS_SERVICE}"      == "true" ]] && services+=("vets-service")
-          [[ "${GENAI_SERVICE}"     == "true" ]] && services+=("genai-service")
-          [[ "${ADMIN_SERVER}"      == "true" ]] && services+=("admin-server")
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            services=(
+              config-server
+              discovery-server
+              api-gateway
+              customers-service
+              visits-service
+              vets-service
+              genai-service
+              admin-server
+            )
+          else
+            [[ "${CONFIG_SERVER}"     == "true" ]] && services+=("config-server")
+            [[ "${DISCOVERY_SERVER}"  == "true" ]] && services+=("discovery-server")
+            [[ "${API_GATEWAY}"       == "true" ]] && services+=("api-gateway")
+            [[ "${CUSTOMERS_SERVICE}" == "true" ]] && services+=("customers-service")
+            [[ "${VISITS_SERVICE}"    == "true" ]] && services+=("visits-service")
+            [[ "${VETS_SERVICE}"      == "true" ]] && services+=("vets-service")
+            [[ "${GENAI_SERVICE}"     == "true" ]] && services+=("genai-service")
+            [[ "${ADMIN_SERVER}"      == "true" ]] && services+=("admin-server")
+          fi
 
           if [[ ${#services[@]} -eq 0 ]]; then
             echo "any=false" >> "${GITHUB_OUTPUT}"
@@ -137,7 +154,7 @@ jobs:
   # =============================================================================
   # Build job
   # Purpose: One matrix leg per changed service — Maven arm64 image, Trivy,
-  #          then push to Terraform-managed petclinic-dev ECR.
+  #          then push to Terraform-managed petclinic-prod ECR.
   # =============================================================================
   build:
     name: build (${{ matrix.service }})
@@ -186,8 +203,8 @@ jobs:
 
       # =============================================================================
       # Resolve image names
-      # Purpose: Short SHA tag plus local Maven image and ECR path (dev only;
-      #          petclinic-dev/* is what Terraform created in this account).
+      # Purpose: Short SHA tag plus local Maven image and ECR path
+      #          (petclinic-prod/* from Terraform).
       # =============================================================================
       - name: Resolve image names
         id: names
@@ -204,7 +221,7 @@ jobs:
             echo "registry=${REGISTRY}"
             echo "module=spring-petclinic-${SERVICE}"
             echo "local_image=springcommunity/spring-petclinic-${SERVICE}"
-            echo "dev_image=${REGISTRY}/petclinic-dev/${SERVICE}:${SHA}"
+            echo "prod_image=${REGISTRY}/petclinic-prod/${SERVICE}:${SHA}"
           } >> "${GITHUB_OUTPUT}"
 
       # =============================================================================
@@ -281,20 +298,20 @@ jobs:
 
       # =============================================================================
       # Retag and push
-      # Purpose: Push the arm64 image to Terraform-managed petclinic-dev ECR only.
+      # Purpose: Push the arm64 image to Terraform-managed petclinic-prod ECR.
       #          Runs only after build + scans complete; empty ECR means this step
       #          never ran (earlier step failed or was skipped).
       # =============================================================================
       - name: Retag and push to ECR
         env:
           LOCAL_IMAGE: ${{ steps.names.outputs.local_image }}
-          DEV_IMAGE: ${{ steps.names.outputs.dev_image }}
+          PROD_IMAGE: ${{ steps.names.outputs.prod_image }}
         run: |
           set -euo pipefail
-          echo "Pushing ${DEV_IMAGE}"
-          docker tag "${LOCAL_IMAGE}" "${DEV_IMAGE}"
-          docker push "${DEV_IMAGE}"
-          echo "Pushed OK: ${DEV_IMAGE}"
+          echo "Pushing ${PROD_IMAGE}"
+          docker tag "${LOCAL_IMAGE}" "${PROD_IMAGE}"
+          docker push "${PROD_IMAGE}"
+          echo "Pushed OK: ${PROD_IMAGE}"
 
   # =============================================================================
   # Dispatch job

@@ -10,8 +10,10 @@ FILES
 -----
 
 1) build-push.yml
-   Push to main → build changed services (arm64) → Trivy (report only) →
-   push to petclinic-dev/* ECR → dispatch petclinic-platform for image.tag.
+   Push to main (or Actions → Run workflow) → build services (arm64) →
+   Trivy (report only) → push to petclinic-prod/* ECR → dispatch
+   petclinic-platform for image.tag.
+   Manual Run workflow builds all 8 services (use for first prod fill).
    Secrets: AWS_ROLE_ARN, AWS_REGION, AWS_ACCOUNT_ID, PLATFORM_REPO_TOKEN.
    No kubectl/helm (Argo CD deploys).
 
@@ -28,7 +30,7 @@ WORKFLOW SKETCH
   |  1. path-filter → which services changed         |
   |  2. matrix: mvn buildDocker (arm64)              |
   |  3. Trivy scan                                   |
-  |  4. push → ECR petclinic-dev/* (Terraform)       |
+  |  4. push → ECR petclinic-prod/* (Terraform)      |
   |  5. repository_dispatch → petclinic-platform     |
   +------------------------+-------------------------+
                            |
